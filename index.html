@@ -363,3 +363,390 @@
 </div>
 
 <div class="toast" id="toast">✓ ส่งรีวิวสำเร็จ</div>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.0/firebase-app.js";
+import { getFirestore, collection, addDoc, onSnapshot, query, orderBy, doc, getDoc } from "https://www.gstatic.com/firebasejs/10.7.0/firebase-firestore.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyCCdp51I7weDauemgnlnYku7bwcSr5NOaM",
+  authDomain: "lynbluu-guitar.firebaseapp.com",
+  projectId: "lynbluu-guitar",
+  storageBucket: "lynbluu-guitar.firebasestorage.app",
+  messagingSenderId: "957850224987",
+  appId: "1:957850224987:web:c116779e8f564623a6327e",
+  measurementId: "G-D561KQJRPH"
+};
+
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+
+let reviews = [];
+let products = [];
+let rating = 0;
+let uploadedImage = null;
+let currentPage = 1;
+const PER_PAGE = 9;
+
+let settings = {
+  shopName: 'Lynbluu',
+  shopSub: 'Guitar Review · Premium Store',
+  gif1: '',
+  gif2: '',
+  stringsEnabled: true
+};
+
+// ===== TIME FORMAT =====
+function formatTime(ts) {
+  if (!ts) return '';
+  const diff = Date.now() - ts;
+  const m = Math.floor(diff / 60000);
+  const h = Math.floor(diff / 3600000);
+  const d = Math.floor(diff / 86400000);
+  if (m < 1)  return 'เมื่อสักครู่';
+  if (m < 60) return m + ' นาทีที่แล้ว';
+  if (h < 24) return h + ' ชั่วโมงที่แล้ว';
+  if (d < 30) return d + ' วันที่แล้ว';
+  const date = new Date(ts);
+  return date.toLocaleDateString('th-TH', { day:'numeric', month:'short', year:'numeric' });
+}
+
+// ===== SETTINGS =====
+async function loadSettings() {
+  try {
+    const ref = doc(db, 'settings', 'main');
+    const snap = await getDoc(ref);
+    if (snap.exists()) settings = { ...settings, ...snap.data() };
+    applySettings();
+  } catch(e) {
+    console.error('Settings error:', e);
+    applySettings();
+  }
+}
+
+function applySettings() {
+  document.getElementById('shopName').textContent = settings.shopName;
+  document.getElementById('shopNameFooter').textContent = settings.shopName;
+  document.getElementById('shopSub').textContent = settings.shopSub;
+  document.title = settings.shopName + ' · Guitar Review';
+
+  const g1 = document.getElementById('gif1');
+  const g2 = document.getElementById('gif2');
+  if (settings.gif1) { g1.src = settings.gif1; g1.style.display = 'block'; }
+  if (settings.gif2) { g2.src = settings.gif2; g2.style.display = 'block'; }
+  document.getElementById('stringsBox').classList.toggle('disabled', !settings.stringsEnabled);
+}
+
+// ===== PRODUCTS =====
+function loadProducts() {
+  const q = query(collection(db, 'products'), orderBy('name'));
+  onSnapshot(q, (snap) => {
+    products = [];
+    snap.forEach(d => products.push({ id: d.id, ...d.data() }));
+    renderProductSelect();
+  }, (err) => console.error('Products error:', err));
+}
+
+function renderProductSelect() {
+  const sel = document.getElementById('inpProduct');
+  sel.innerHTML = '<option value="">-- เลือกสินค้า --</option>';
+  products.forEach(p => {
+    const opt = document.createElement('option');
+    opt.value = p.name;
+    opt.textContent = p.name;
+    sel.appendChild(opt);
+  });
+}
+
+// ===== REVIEWS =====
+function loadReviews() {
+  const q = query(collection(db, 'reviews'), orderBy('createdAt', 'desc'));
+  onSnapshot(q, (snap) => {
+    reviews = [];
+    snap.forEach(d => reviews.push({ id: d.id, ...d.data() }));
+    updateSummary();
+    renderPagination();
+    startBubbles();
+  }, (err) => console.error('Reviews error:', err));
+}
+
+// ===== AUDIO =====
+let audioCtx = null, masterGain = null;
+function initAudio() {
+  if (audioCtx) return;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  masterGain = audioCtx.createGain();
+  masterGain.gain.value = 0.35;
+  masterGain.connect(audioCtx.destination);
+}
+function makeDistortionCurve(amount) {
+  amount = amount || 50;
+  const n = 44100, curve = new Float32Array(n), deg = Math.PI / 180;
+  for (let i = 0; i < n; i++) {
+    const x = (i * 2) / n - 1;
+    curve[i] = ((3 + amount) * x * 20 * deg) / (Math.PI + amount * Math.abs(x));
+  }
+  return curve;
+}
+function playString(freq) {
+  initAudio();
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  const now = audioCtx.currentTime;
+  const osc = audioCtx.createOscillator();
+  osc.type = 'sawtooth';
+  osc.frequency.value = freq;
+  const osc2 = audioCtx.createOscillator();
+  osc2.type = 'square';
+  osc2.frequency.value = freq * 2;
+  osc2.detune.value = 8;
+  const dist = audioCtx.createWaveShaper();
+  dist.curve = makeDistortionCurve(80);
+  dist.oversample = '4x';
+  const filter = audioCtx.createBiquadFilter();
+  filter.type = 'lowpass';
+  filter.frequency.value = 3200;
+  filter.Q.value = 1.5;
+  const gain = audioCtx.createGain();
+  gain.gain.setValueAtTime(0, now);
+  gain.gain.linearRampToValueAtTime(0.9, now + 0.005);
+  gain.gain.exponentialRampToValueAtTime(0.4, now + 0.08);
+  gain.gain.exponentialRampToValueAtTime(0.001, now + 1.2);
+  osc.connect(dist); osc2.connect(dist);
+  dist.connect(filter); filter.connect(gain);
+  gain.connect(masterGain);
+  osc.start(now); osc2.start(now);
+  osc.stop(now + 1.3); osc2.stop(now + 1.3);
+}
+const NOTE_FREQ = { E2: 82.41, A2: 110.00, D3: 146.83, G3: 196.00, B3: 246.94, E4: 329.63 };
+
+document.querySelectorAll('.string').forEach(str => {
+  str.addEventListener('click', () => {
+    playString(NOTE_FREQ[str.dataset.note]);
+    str.classList.remove('vibrating');
+    void str.offsetWidth;
+    str.classList.add('vibrating');
+    setTimeout(() => str.classList.remove('vibrating'), 500);
+  });
+});
+
+// ===== BUBBLES =====
+function spawnBubble(review, laneId) {
+  const lane = document.getElementById(laneId);
+  if (!lane) return;
+  const b = document.createElement('div');
+  b.className = 'bubble';
+  const stars = '★'.repeat(review.stars) + '☆'.repeat(5 - review.stars);
+  const timeAgo = formatTime(review.createdAt);
+  b.innerHTML =
+    '<div class="b-head">' +
+      '<span class="b-name">' + escapeHtml(review.name) + '</span>' +
+      '<span class="b-stars">' + stars + '</span>' +
+    '</div>' +
+    '<span class="b-product">' + escapeHtml(review.product) + '</span>' +
+    '<div class="b-time">🕐 ' + timeAgo + '</div>' +
+    '<div class="b-text">' + escapeHtml(review.text) + '</div>' +
+    (review.img ? '<img class="b-img" src="' + review.img + '" alt="">' : '');
+  lane.appendChild(b);
+  const duration = 6 + Math.random() * 2;
+  b.style.animation = 'floatLR ' + duration + 's linear forwards';
+  setTimeout(() => b.remove(), duration * 1000 + 100);
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  })[c]);
+}
+
+// ===== TIMERS =====
+let bubbleTimers = [];
+function clearBubbleTimers() {
+  bubbleTimers.forEach(t => clearInterval(t));
+  bubbleTimers = [];
+}
+function startBubbles() {
+  clearBubbleTimers();
+  ['lane1','lane2','lane3'].forEach(id => document.getElementById(id).innerHTML = '');
+  const start = (currentPage - 1) * PER_PAGE;
+  const pageReviews = reviews.slice(start, start + PER_PAGE);
+  if (pageReviews.length === 0) return;
+
+  const group1 = pageReviews.filter((_, i) => i % 3 === 0);
+  const group2 = pageReviews.filter((_, i) => i % 3 === 1);
+  const group3 = pageReviews.filter((_, i) => i % 3 === 2);
+  const lanes = [
+    { id: 'lane1', group: group1 },
+    { id: 'lane2', group: group2 },
+    { id: 'lane3', group: group3 }
+  ];
+
+  if (currentPage === 1) {
+    lanes.forEach(lane => {
+      if (!lane.group.length) return;
+      let i = 0;
+      spawnBubble(lane.group[0], lane.id);
+      const t = setInterval(() => {
+        i++;
+        spawnBubble(lane.group[i % lane.group.length], lane.id);
+      }, 3500);
+      bubbleTimers.push(t);
+    });
+  } else if (currentPage === 2) {
+    lanes.forEach((lane, idx) => {
+      if (!lane.group.length) return;
+      setTimeout(() => {
+        let i = 0;
+        spawnBubble(lane.group[0], lane.id);
+        const t = setInterval(() => {
+          i++;
+          spawnBubble(lane.group[i % lane.group.length], lane.id);
+        }, 3500);
+        bubbleTimers.push(t);
+      }, idx * 900);
+    });
+  } else {
+    [...lanes].reverse().forEach((lane, idx) => {
+      if (!lane.group.length) return;
+      setTimeout(() => {
+        let i = 0;
+        spawnBubble(lane.group[0], lane.id);
+        const t = setInterval(() => {
+          i++;
+          spawnBubble(lane.group[i % lane.group.length], lane.id);
+        }, 3500);
+        bubbleTimers.push(t);
+      }, idx * 900);
+    });
+  }
+}
+
+// ===== PAGINATION =====
+function renderPagination() {
+  const totalPages = Math.ceil(reviews.length / PER_PAGE);
+  const box = document.getElementById('pagination');
+  box.innerHTML = '';
+  for (let p = 1; p <= totalPages; p++) {
+    const btn = document.createElement('button');
+    btn.className = 'page-btn' + (p === currentPage ? ' active' : '');
+    btn.textContent = p;
+    btn.onclick = () => gotoPage(p);
+    box.appendChild(btn);
+  }
+  if (currentPage < totalPages) {
+    const next = document.createElement('button');
+    next.className = 'page-btn';
+    next.textContent = '→';
+    next.onclick = () => gotoPage(currentPage + 1);
+    box.appendChild(next);
+  }
+}
+function gotoPage(p) { currentPage = p; renderPagination(); startBubbles(); }
+
+// ===== SUMMARY =====
+function updateSummary() {
+  const count = reviews.length;
+  document.getElementById('reviewCount').textContent = count;
+  if (count === 0) {
+    document.getElementById('avgScore').textContent = '0.0';
+    document.getElementById('avgStars').textContent = '☆☆☆☆☆';
+    return;
+  }
+  const avg = reviews.reduce((s, r) => s + r.stars, 0) / count;
+  const rounded = Math.round(avg);
+  document.getElementById('avgScore').textContent = avg.toFixed(1);
+  document.getElementById('avgStars').textContent = '★'.repeat(rounded) + '☆'.repeat(5 - rounded);
+}
+
+// ===== MODAL =====
+function openModal() { document.getElementById('modalOverlay').classList.add('active'); }
+function closeModal() {
+  document.getElementById('modalOverlay').classList.remove('active');
+  resetForm();
+}
+function resetForm() {
+  document.getElementById('inpName').value = '';
+  document.getElementById('inpProduct').value = '';
+  document.getElementById('inpText').value = '';
+  document.getElementById('inpImage').value = '';
+  document.getElementById('uploadPreview').src = '';
+  document.getElementById('uploadBox').classList.remove('has-image');
+  uploadedImage = null;
+  rating = 0;
+  updateStars();
+}
+window.openModal = openModal;
+window.closeModal = closeModal;
+
+// ===== STARS =====
+function updateStars() {
+  document.querySelectorAll('#starPicker .s').forEach(s => {
+    s.classList.toggle('active', +s.dataset.v <= rating);
+  });
+}
+document.querySelectorAll('#starPicker .s').forEach(s => {
+  s.addEventListener('click', () => { rating = +s.dataset.v; updateStars(); });
+});
+
+// ===== UPLOAD =====
+document.getElementById('inpImage').addEventListener('change', e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  if (file.size > 800 * 1024) {
+    showToast('⚠ รูปใหญ่เกิน 800KB');
+    e.target.value = '';
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = ev => {
+    uploadedImage = ev.target.result;
+    document.getElementById('uploadPreview').src = uploadedImage;
+    document.getElementById('uploadBox').classList.add('has-image');
+  };
+  reader.readAsDataURL(file);
+});
+
+// ===== SUBMIT =====
+async function submitReview() {
+  const name = document.getElementById('inpName').value.trim();
+  const product = document.getElementById('inpProduct').value;
+  const text = document.getElementById('inpText').value.trim();
+
+  if (!name) return showToast('⚠ กรุณากรอกชื่อ');
+  if (!product) return showToast('⚠ กรุณาเลือกสินค้า');
+  if (rating === 0) return showToast('⚠ กรุณาให้คะแนน');
+  if (!text) return showToast('⚠ กรุณาเขียนรีวิว');
+
+  try {
+    await addDoc(collection(db, 'reviews'), {
+      name: name, product: product, stars: rating, text: text,
+      img: uploadedImage,
+      createdAt: Date.now()
+    });
+    closeModal();
+    showToast('✓ ส่งรีวิวสำเร็จ');
+  } catch (e) {
+    console.error(e);
+    showToast('⚠ เกิดข้อผิดพลาด');
+  }
+}
+window.submitReview = submitReview;
+
+// ===== TOAST =====
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => t.classList.remove('show'), 2400);
+}
+
+// ===== INIT =====
+await loadSettings();
+loadProducts();
+loadReviews();
+
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+</script>
+
+</body>
+</html>
